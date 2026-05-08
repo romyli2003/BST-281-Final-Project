@@ -153,6 +153,15 @@ Optional barcode files for specific glial subtypes are also included:
 - `oligodendrocyte_barcodes.csv`
 - `opc_barcodes.csv`
 
+## Large files
+
+The following subset objects are distributed separately because they are too large for standard GitHub file upload:
+
+- `microglia_subset.rds`: [Download here](https://hu-my.sharepoint.com/:u:/g/personal/romyli_hsph_harvard_edu/IQCBMdem3g4PR4peekJ9Vr8aAUOjD35UX634kFAK0oWVa2M?e=qbOo61)
+- `glia_subset.rds`: [Download here](https://hu-my.sharepoint.com/:u:/g/personal/romyli_hsph_harvard_edu/IQCIkpJOPi4_TIWX_UHGV6JBAaQF8Wq-xBWtqF3qZ9cMMtM?e=ZGql1r)
+
+These files correspond to the annotated subsets used for downstream Modules 2 and 4.
+
 ## Recommended starting points by module
 
 - **Module 2** should start from `microglia_subset.rds`
