@@ -1,0 +1,729 @@
+---
+title: "BST 281 FP Module 1"
+author: "Romy Li"
+date: "2026-05-08"
+output: html_document
+---
+
+### 1. Unpack the archive and organize the files
+
+```{r}
+untar("GSE140510_RAW.tar", exdir = "GSE140510_RAW")
+list.files("GSE140510_RAW")
+```
+
+### 2. Build a sample metadata sheet
+
+```{r}
+sample_info <- data.frame(
+  gsm = c(
+    "GSM4173504","GSM4173505","GSM4173506",
+    "GSM4173507","GSM4173508","GSM4173509",
+    "GSM4173510","GSM4173511","GSM4173512",
+    "GSM4173513","GSM4173514","GSM4173515"
+  ),
+  sample_id = c(
+    "WT1","WT2","WT3",
+    "Trem2_KO1","Trem2_KO2","Trem2_KO3",
+    "WT_5XFAD1","WT_5XFAD2","WT_5XFAD3",
+    "Trem2_KO_5XFAD1","Trem2_KO_5XFAD2","Trem2_KO_5XFAD3"
+  ),
+  condition = c(
+    rep("WT", 3),
+    rep("Trem2_KO", 3),
+    rep("WT_5XFAD", 3),
+    rep("Trem2_KO_5XFAD", 3)
+  ),
+  replicate = rep(1:3, 4),
+  stringsAsFactors = FALSE
+)
+
+sample_info$trem2_status <- ifelse(grepl("Trem2_KO", sample_info$condition), "KO", "WT")
+sample_info$ad_status <- ifelse(grepl("5XFAD", sample_info$condition), "5XFAD", "non_5XFAD")
+
+sample_info
+```
+
+### 3. Read each sample separately into Seurat
+
+```{r}
+library(Seurat)
+library(Matrix)
+
+raw_dir <- "GSE140510_RAW"
+
+read_one_sample <- function(gsm, sample_name) {
+  all_files <- list.files(raw_dir, full.names = TRUE)
+  
+  mtx_file <- all_files[grepl(gsm, all_files) & grepl("matrix", all_files)]
+  bc_file  <- all_files[grepl(gsm, all_files) & grepl("barcode", all_files)]
+  feat_file <- all_files[grepl(gsm, all_files) & grepl("features|genes", all_files)]
+  
+  counts <- ReadMtx(
+    mtx = mtx_file,
+    cells = bc_file,
+    features = feat_file,
+    feature.column = 2
+  )
+  
+  obj <- CreateSeuratObject(
+    counts = counts,
+    project = sample_name,
+    min.cells = 3,
+    min.features = 100
+  )
+  
+  obj$gsm <- gsm
+  obj$sample_id <- sample_name
+  
+  obj
+}
+
+objs <- vector("list", nrow(sample_info))
+names(objs) <- sample_info$sample_id
+
+for (i in seq_len(nrow(sample_info))) {
+  objs[[i]] <- read_one_sample(sample_info$gsm[i], sample_info$sample_id[i])
+  
+  objs[[i]]$condition <- sample_info$condition[i]
+  objs[[i]]$replicate <- sample_info$replicate[i]
+  objs[[i]]$trem2_status <- sample_info$trem2_status[i]
+  objs[[i]]$ad_status <- sample_info$ad_status[i]
+}
+
+# Inspect one object
+objs[[1]]
+head(colnames(objs[[1]]))
+head(rownames(objs[[1]]))
+
+# Check the dimensions of all objects to make sure there's no outliers
+sapply(objs, dim)
+```
+
+### 4. Compute QC metrics before filtering
+
+```{r}
+# Check mitochondrial gene prefix
+grep("^mt-", rownames(objs[[1]]), value = TRUE)[1:20]
+
+# Add mitochondrial percentage
+for (i in seq_along(objs)) {
+  objs[[i]][["percent.mt"]] <- PercentageFeatureSet(objs[[i]], pattern = "^mt-")
+}
+
+# Build a combined QC dataframe
+qc_df <- do.call(rbind, lapply(names(objs), function(s) {
+  md <- objs[[s]]@meta.data
+  md$sample <- s
+  md$cell <- rownames(md)
+  md
+}))
+
+head(qc_df)
+table(qc_df$sample)
+```
+
+Make a summary table
+
+```{r}
+qc_summary <- do.call(rbind, lapply(names(objs), function(s) {
+  x <- subset(qc_df, sample == s)
+  data.frame(
+    sample = s,
+    n_cells = nrow(x),
+    nFeature_median = median(x$nFeature_RNA),
+    nFeature_q01 = quantile(x$nFeature_RNA, 0.01),
+    nFeature_q05 = quantile(x$nFeature_RNA, 0.05),
+    nFeature_q95 = quantile(x$nFeature_RNA, 0.95),
+    nFeature_q99 = quantile(x$nFeature_RNA, 0.99),
+    nCount_median = median(x$nCount_RNA),
+    nCount_q95 = quantile(x$nCount_RNA, 0.95),
+    nCount_q99 = quantile(x$nCount_RNA, 0.99),
+    percent_mt_median = median(x$percent.mt),
+    percent_mt_q95 = quantile(x$percent.mt, 0.95),
+    percent_mt_q99 = quantile(x$percent.mt, 0.99)
+  )
+}))
+
+qc_summary
+```
+
+The table shows whether any sample has unusually low complexity or much higher mitochondrial percentage. It also gives an idea of what sensible cutoffs might be.
+
+For better visualization, let's make three combined plots across all samples
+
+```{r}
+library(ggplot2)
+
+ggplot(qc_df, aes(x = sample, y = nFeature_RNA)) +
+  geom_violin(scale = "width") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(qc_df, aes(x = sample, y = nCount_RNA)) +
+  geom_violin(scale = "width") +
+  scale_y_log10() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(qc_df, aes(x = sample, y = percent.mt)) +
+  geom_violin(scale = "width") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+I also created two sets of scatter plots with `nCount_RNA` on the x-axis and either `nFeature_RNA` or `percent.mt` on the y-axis. This gives a quick visual check for low-count debris, possible doublets, and any strange sample-specific structure. Random sub-sampling of 1,000 cells from each sample is employed for efficiency.
+
+```{r}
+set.seed(1)
+
+qc_scatter <- do.call(rbind, lapply(split(qc_df, qc_df$sample), function(df) {
+  df[sample(seq_len(nrow(df)), min(1000, nrow(df))), ]
+}))
+
+ggplot(qc_scatter, aes(x = nCount_RNA, y = nFeature_RNA)) +
+  geom_point(size = 0.3, alpha = 0.4) +
+  facet_wrap(~sample, scales = "free") +
+  theme_bw()
+
+ggplot(qc_scatter, aes(x = nCount_RNA, y = percent.mt)) +
+  geom_point(size = 0.3, alpha = 0.4) +
+  facet_wrap(~sample, scales = "free") +
+  theme_bw()
+```
+
+### 5. Doing a first-pass QC filter
+
+Based on the above results, I'm choosing the following first-pass filtering criteria:
+
+- `nFeature_RNA >= 400`: the 1st-percentile values are around 407 to 460 for most samples, so 400 is a sensible lower bound that removes obvious low-quality barcodes without being too aggressive.
+
+- `nFeature_RNA <= 6000`: Most samples have their 99th percentile around 4,800 to 5,900 genes, and only a sparse tail extends beyond that. Cells above 6,000 are likely enriched for doublets or multiplets, so 6,000 is a good upper cutoff.
+
+- `nCount_RNA <= 20000`: The nCount distributions are pretty similar across samples, and only a small number of cells sit in the extreme high-count tail. A 20,000 cutoff removes those obvious outliers without trimming too much of the valid distribution.
+
+- `percent.mt <= 10`: Most nuclei have extremely low mitochondrial percentage, which is what we expect for snRNA-seq, but a few samples have broader upper tails. Using 10% removes the clearly bad high-mito cells while avoiding disproportionately heavy filtering in samples like `Trem2_KO1` and `WT_5XFAD2`.
+
+```{r}
+objs_qc <- lapply(objs, function(x) {
+  subset(
+    x,
+    subset = nFeature_RNA >= 400 &
+             nFeature_RNA <= 6000 &
+             nCount_RNA <= 20000 &
+             percent.mt <= 10
+  )
+})
+
+# Compare cell counts before and after
+data.frame(
+  sample = names(objs),
+  before = sapply(objs, ncol),
+  after = sapply(objs_qc, ncol)
+)
+```
+
+The criteria don't appear excessively or disproportionally harsh on any sample.
+
+### 6. Save the pre-integration handoff objects
+
+These objects are useful for downstream analysis of other group members.
+
+```{r}
+saveRDS(objs, "module1_objects_prefilter.rds")
+saveRDS(objs_qc, "module1_objects_postfilter_initial.rds")
+write.csv(sample_info, "sample_info.csv", row.names = FALSE)
+```
+
+### 7. Normalize each sample and prepare for integration
+
+I used RPCA instead of CCA and reference-based integration instead of pairwise integration to speed up the process since I'm running on a local machine with limited RAM.
+
+```{r}
+library(Seurat)
+
+# Clean up memory before integration
+rm(objs, qc_df, qc_scatter, qc_summary, i, features)
+gc()
+
+# Unique cell names
+objs_qc <- Map(
+  f = function(obj, nm) RenameCells(obj, add.cell.id = nm),
+  obj = objs_qc,
+  nm = names(objs_qc)
+)
+
+gc()
+
+# Preprocess each sample for RPCA integration
+objs_qc <- lapply(objs_qc, function(x) {
+  DefaultAssay(x) <- "RNA"
+  x <- NormalizeData(x, verbose = FALSE)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+  x <- ScaleData(x, verbose = FALSE)
+  x <- RunPCA(x, npcs = 30, verbose = FALSE)
+  x
+})
+
+gc()
+
+# Choose one reference sample per biological condition
+ref.samples <- c("WT2", "Trem2_KO2", "WT_5XFAD1", "Trem2_KO_5XFAD2")
+ref.idx <- match(ref.samples, names(objs_qc))
+
+# Select integration features
+features <- SelectIntegrationFeatures(
+  object.list = objs_qc,
+  nfeatures = 2000
+)
+
+# Faster anchor finding: RPCA + reference-based integration
+anchors <- FindIntegrationAnchors(
+  object.list = objs_qc,
+  anchor.features = features,
+  reduction = "rpca",
+  dims = 1:30,
+  reference = ref.idx
+)
+
+gc()
+
+# Integrate datasets
+obj_integrated <- IntegrateData(
+  anchorset = anchors,
+  dims = 1:30
+)
+
+# Free memory once integration is done
+rm(anchors, features)
+gc()
+
+# Downstream dimensional reduction and clustering
+DefaultAssay(obj_integrated) <- "integrated"
+
+obj_integrated <- ScaleData(obj_integrated, verbose = FALSE)
+obj_integrated <- RunPCA(obj_integrated, npcs = 30, verbose = FALSE)
+obj_integrated <- RunUMAP(obj_integrated, dims = 1:30)
+obj_integrated <- FindNeighbors(obj_integrated, dims = 1:30)
+obj_integrated <- FindClusters(obj_integrated, resolution = 0.3)
+
+# Save result
+saveRDS(obj_integrated, "module1_integrated_rpca_reference.rds")
+```
+
+### 8. Broad Cell Type Annotation with the Integrated Dataset
+
+```{r, eval=FALSE}
+# Load checkpoint if necessary
+library(Seurat)
+obj_integrated <- readRDS("module1_integrated_rpca_reference.rds")
+```
+
+Check RNA assay state before running marker discovery
+
+```{r}
+DefaultAssay(obj_integrated) <- "RNA"
+
+print(Layers(obj_integrated[["RNA"]]))
+print(table(obj_integrated$seurat_clusters))
+
+sample_cluster_tab <- table(obj_integrated$sample_id, obj_integrated$seurat_clusters)
+dim(sample_cluster_tab)
+sample_cluster_tab[1:5, 1:10]
+```
+
+Join the RNA layers, run cluster markers, and make a compact top-marker table for annotation
+
+```{r}
+obj_integrated <- JoinLayers(obj_integrated, assay = "RNA")
+
+Layers(obj_integrated[["RNA"]])
+
+Idents(obj_integrated) <- "seurat_clusters"
+
+all_markers <- FindAllMarkers(
+  obj_integrated,
+  assay = "RNA",
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+top_markers <- do.call(
+  rbind,
+  lapply(split(all_markers, all_markers$cluster), function(df) {
+    df <- df[order(df$avg_log2FC, decreasing = TRUE), ]
+    head(df[, c("cluster", "gene", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")], 10)
+  })
+)
+
+top_markers
+```
+
+Cluster-level annotation table
+
+```{r}
+# 2) canonical marker panels for broad cell types
+marker_sets <- list(
+  Microglia = c("Tmem119", "P2ry12", "Cx3cr1", "Aif1", "Tyrobp", "Csf1r"),
+  Astrocyte = c("Aqp4", "Gfap", "Aldh1l1", "Slc1a3", "Aldoc", "Clu"),
+  Oligodendrocyte = c("Mog", "Mbp", "Mobp", "Plp1", "Mag", "Cldn11", "Sox10"),
+  OPC = c("Pdgfra", "Cspg4", "Vcan", "Olig1", "Olig2"),
+  Neuron = c("Snap25", "Syt1", "Rbfox3", "Tubb3", "Slc17a7", "Gad1", "Gad2"),
+  Endothelial = c("Cldn5", "Pecam1", "Kdr", "Flt1", "Emcn"),
+  Pericyte_VSMC = c("Rgs5", "Pdgfrb", "Kcnj8", "Abcc9", "Acta2", "Mcam"),
+  Ependymal_Choroid = c("Foxj1", "Ttr", "Ccdc153", "Pifo")
+)
+
+# 3) average RNA expression by cluster
+avg_expr <- AverageExpression(
+  obj_integrated,
+  assays = "RNA",
+  slot = "data",
+  group.by = "seurat_clusters",
+  verbose = FALSE
+)$RNA
+
+avg_expr_z <- t(scale(t(avg_expr)))
+avg_expr_z[is.na(avg_expr_z)] <- 0
+
+# 4) score each cluster against each marker panel
+score_mat <- sapply(names(marker_sets), function(ct) {
+  genes <- intersect(marker_sets[[ct]], rownames(avg_expr_z))
+  if (length(genes) == 0) {
+    rep(NA_real_, ncol(avg_expr_z))
+  } else {
+    colMeans(avg_expr_z[genes, , drop = FALSE])
+  }
+})
+
+# rebuild score_df with cleaned cluster names
+score_df <- data.frame(
+  cluster = sub("^g", "", colnames(avg_expr_z)),
+  as.data.frame(score_mat),
+  check.names = FALSE
+)
+
+score_cols <- names(marker_sets)
+
+score_df$provisional_celltype <- score_cols[
+  max.col(score_df[, score_cols, drop = FALSE], ties.method = "first")
+]
+
+score_df$max_score <- apply(
+  score_df[, score_cols, drop = FALSE],
+  1,
+  max,
+  na.rm = TRUE
+)
+
+score_df$provisional_celltype[
+  is.na(score_df$max_score) | score_df$max_score < 0.25
+] <- "Unknown"
+
+cluster_key <- merge(
+  data.frame(cluster = as.character(sort(unique(obj_integrated$seurat_clusters)))),
+  score_df[, c("cluster", "provisional_celltype", "max_score")],
+  by = "cluster",
+  all.x = TRUE
+)
+
+cluster_key$top_markers <- unname(top3_markers[cluster_key$cluster])
+
+cluster_key
+```
+
+We can see that the panel-scoring algorithm is working but only partially. There're still many `Ependymal_choroid` calls, some `astrocyte` calls, and some `unknown` clusters. Let's inspect canonical markers directly by cluster.
+
+```{r, fig.width=12, fig.height=5}
+canonical_markers <- c(
+  "Tmem119","P2ry12","Cx3cr1","Aif1","Tyrobp","Csf1r",          # microglia
+  "Aqp4","Gfap","Aldh1l1","Slc1a3","Aldoc","Clu",              # astrocyte
+  "Mog","Mbp","Mobp","Plp1","Mag","Cldn11","Sox10",            # oligodendrocyte
+  "Pdgfra","Cspg4","Vcan","Olig1","Olig2",                     # OPC
+  "Snap25","Syt1","Rbfox3","Tubb3","Slc17a7","Gad1","Gad2",    # neuron
+  "Cldn5","Pecam1","Kdr","Flt1","Emcn",                        # endothelial
+  "Rgs5","Pdgfrb","Kcnj8","Abcc9","Acta2","Mcam",              # pericyte/VSMC
+  "Foxj1","Ttr","Ccdc153","Pifo"                               # ependymal/choroid
+)
+
+canonical_markers <- canonical_markers[canonical_markers %in% rownames(obj_integrated)]
+
+p_dot <- DotPlot(
+  obj_integrated,
+  features = canonical_markers,
+  assay = "RNA",
+  group.by = "seurat_clusters"
+) + RotatedAxis()
+
+p_dot
+
+dot_data <- DotPlot(
+  obj_integrated,
+  features = canonical_markers,
+  assay = "RNA",
+  group.by = "seurat_clusters"
+)$data
+
+write.csv(dot_data, "canonical_marker_dotplot_data.csv", row.names = FALSE)
+
+canonical_markers
+```
+
+We can make some high-confidence broad calls based on the dot plot:
+
+- `Oligodendrocyte`: 0, 26, 28
+
+- `OPC`: 14
+
+- `Microglia`: 9
+
+- `Endothelial`: 25
+
+- `Pericyte/VSMC`: 27
+
+- `Astrocyte`: 8, 21
+
+Clusters 1, 12, 19, and 30 are still ambiguous and needs further inspection.
+```{r}
+ambig_clusters <- c("1", "12", "19", "30")
+
+ambig_top <- do.call(
+  rbind,
+  lapply(ambig_clusters, function(cl) {
+    df <- subset(all_markers, cluster == cl)
+    df <- df[order(df$avg_log2FC, decreasing = TRUE), ]
+    head(df[, c("cluster", "gene", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")], 15)
+  })
+)
+
+ambig_top
+```
+
+Seeing the marker of the ambiguous clusters help us determined their identities. Below is the reviewed cluster key:
+```{r}
+cluster_key_reviewed <- data.frame(
+  cluster = as.character(0:30),
+  broad_celltype = c(
+    "Oligodendrocyte",   # 0
+    "Fibroblast_Stromal",# 1
+    "Neuron",            # 2
+    "Neuron",            # 3
+    "Neuron",            # 4
+    "Neuron",            # 5
+    "Neuron",            # 6
+    "Neuron",            # 7
+    "Astrocyte",         # 8
+    "Microglia",         # 9
+    "Neuron",            # 10
+    "Neuron",            # 11
+    "Low_quality",       # 12
+    "Neuron",            # 13
+    "OPC",               # 14
+    "Neuron",            # 15
+    "Neuron",            # 16
+    "Neuron",            # 17
+    "Neuron",            # 18
+    "Fibroblast_Stromal",# 19
+    "Neuron",            # 20
+    "Astrocyte",         # 21
+    "Neuron",            # 22
+    "Neuron",            # 23
+    "Neuron",            # 24
+    "Endothelial",       # 25
+    "Oligodendrocyte",   # 26
+    "Pericyte_VSMC",     # 27
+    "Oligodendrocyte",   # 28
+    "Neuron",            # 29
+    "Astrocyte"          # 30
+  ),
+  stringsAsFactors = FALSE
+)
+
+obj_integrated$cluster_id <- as.character(obj_integrated$seurat_clusters)
+obj_integrated$broad_celltype <- cluster_key_reviewed$broad_celltype[
+  match(obj_integrated$cluster_id, cluster_key_reviewed$cluster)
+]
+
+obj_integrated$is_glia <- obj_integrated$broad_celltype %in% c(
+  "Microglia", "Astrocyte", "Oligodendrocyte", "OPC"
+)
+
+write.csv(cluster_key_reviewed, "cluster_annotation_key_reviewed.csv", row.names = FALSE)
+
+table(obj_integrated$broad_celltype)
+table(obj_integrated$cluster_id, obj_integrated$broad_celltype)
+```
+
+I'd exclude cluster 12 from downstream handoff as it contains mostly `Low_quality` calls. The other clusters appear to be in good shape.
+### 9. Exporting files to handoff to teammates
+```{r}
+# -----------------------------
+# 1) save reviewed annotation key + marker tables
+# -----------------------------
+write.csv(cluster_key_reviewed, "cluster_annotation_key_reviewed.csv", row.names = FALSE)
+write.csv(all_markers, "cluster_markers_all.csv", row.names = FALSE)
+write.csv(top_markers, "cluster_top10_markers.csv", row.names = FALSE)
+
+# -----------------------------
+# 2) create handoff object excluding low-quality cluster
+# -----------------------------
+obj_handoff <- subset(obj_integrated, subset = broad_celltype != "Low_quality")
+
+# keep RNA as default for downstream DE convenience
+DefaultAssay(obj_handoff) <- "RNA"
+
+# save both full annotated object and cleaned handoff object
+saveRDS(obj_integrated, "module1_integrated_annotated_full.rds")
+saveRDS(obj_handoff, "module1_integrated_handoff_no_lowq.rds")
+
+# -----------------------------
+# 3) export cell-level metadata
+# -----------------------------
+meta_full <- obj_integrated[[]]
+meta_full$cell_barcode <- rownames(meta_full)
+
+if ("umap" %in% names(obj_integrated@reductions)) {
+  umap_full <- as.data.frame(Embeddings(obj_integrated, "umap"))
+  colnames(umap_full) <- c("UMAP_1", "UMAP_2")
+  meta_full <- cbind(meta_full, umap_full[rownames(meta_full), , drop = FALSE])
+}
+
+write.csv(meta_full, "cell_metadata_annotated_full.csv", row.names = FALSE)
+
+meta_handoff <- obj_handoff[[]]
+meta_handoff$cell_barcode <- rownames(meta_handoff)
+
+if ("umap" %in% names(obj_handoff@reductions)) {
+  umap_handoff <- as.data.frame(Embeddings(obj_handoff, "umap"))
+  colnames(umap_handoff) <- c("UMAP_1", "UMAP_2")
+  meta_handoff <- cbind(meta_handoff, umap_handoff[rownames(meta_handoff), , drop = FALSE])
+}
+
+write.csv(meta_handoff, "cell_metadata_handoff_no_lowq.csv", row.names = FALSE)
+
+# -----------------------------
+# 4) sample-by-celltype and sample-by-cluster tables
+# -----------------------------
+# start from observed metadata rows only
+meta_handoff <- obj_handoff[[]]
+meta_handoff$cell_barcode <- rownames(meta_handoff)
+
+# one clean sample-level mapping
+sample_info_handoff <- unique(
+  meta_handoff[, c("sample_id", "condition", "replicate", "gsm", "trem2_status", "ad_status")]
+)
+sample_info_handoff <- sample_info_handoff[order(sample_info_handoff$sample_id), ]
+
+write.csv(sample_info_handoff, "sample_info_handoff.csv", row.names = FALSE)
+
+# observed-only sample x celltype counts
+sample_celltype_counts <- aggregate(
+  cell_barcode ~ sample_id + condition + replicate + broad_celltype,
+  data = meta_handoff,
+  FUN = length
+)
+colnames(sample_celltype_counts)[colnames(sample_celltype_counts) == "cell_barcode"] <- "n_cells"
+
+sample_totals <- aggregate(
+  n_cells ~ sample_id,
+  data = sample_celltype_counts,
+  FUN = sum
+)
+colnames(sample_totals)[2] <- "sample_total"
+
+sample_celltype_counts <- merge(sample_celltype_counts, sample_totals, by = "sample_id")
+sample_celltype_counts$prop_within_sample <- sample_celltype_counts$n_cells / sample_celltype_counts$sample_total
+sample_celltype_counts$sample_total <- NULL
+
+write.csv(sample_celltype_counts, "sample_by_celltype_counts_long.csv", row.names = FALSE)
+
+# observed-only sample x cluster counts
+sample_cluster_counts <- aggregate(
+  cell_barcode ~ sample_id + condition + replicate + cluster_id,
+  data = meta_handoff,
+  FUN = length
+)
+colnames(sample_cluster_counts)[colnames(sample_cluster_counts) == "cell_barcode"] <- "n_cells"
+
+sample_cluster_totals <- aggregate(
+  n_cells ~ sample_id,
+  data = sample_cluster_counts,
+  FUN = sum
+)
+colnames(sample_cluster_totals)[2] <- "sample_total"
+
+sample_cluster_counts <- merge(sample_cluster_counts, sample_cluster_totals, by = "sample_id")
+sample_cluster_counts$prop_within_sample <- sample_cluster_counts$n_cells / sample_cluster_counts$sample_total
+sample_cluster_counts$sample_total <- NULL
+
+write.csv(sample_cluster_counts, "sample_by_cluster_counts_long.csv", row.names = FALSE)
+
+# wide versions from corrected long tables
+sample_celltype_wide <- xtabs(n_cells ~ sample_id + broad_celltype, data = sample_celltype_counts)
+write.csv(as.data.frame.matrix(sample_celltype_wide), "sample_by_celltype_counts_wide.csv")
+
+sample_cluster_wide <- xtabs(n_cells ~ sample_id + cluster_id, data = sample_cluster_counts)
+write.csv(as.data.frame.matrix(sample_cluster_wide), "sample_by_cluster_counts_wide.csv")
+
+# quick checks
+cat("Corrected dimensions:\n")
+print(dim(sample_celltype_counts))
+print(dim(sample_cluster_counts))
+
+cat("\nFirst few corrected rows:\n")
+print(head(sample_celltype_counts))
+
+cat("\nSample info:\n")
+print(sample_info_handoff)
+
+# -----------------------------
+# 5) export microglia and glia subsets
+# -----------------------------
+glia_types <- c("Microglia", "Astrocyte", "Oligodendrocyte", "OPC")
+
+microglia_obj <- subset(obj_handoff, subset = broad_celltype == "Microglia")
+glia_obj <- subset(obj_handoff, subset = broad_celltype %in% glia_types)
+
+saveRDS(microglia_obj, "microglia_subset.rds")
+saveRDS(glia_obj, "glia_subset.rds")
+
+microglia_meta <- microglia_obj[[]]
+microglia_meta$cell_barcode <- rownames(microglia_meta)
+write.csv(microglia_meta, "microglia_metadata.csv", row.names = FALSE)
+write.csv(data.frame(cell_barcode = rownames(microglia_meta)),
+          "microglia_barcodes.csv", row.names = FALSE)
+
+glia_meta <- glia_obj[[]]
+glia_meta$cell_barcode <- rownames(glia_meta)
+write.csv(glia_meta, "glia_metadata.csv", row.names = FALSE)
+write.csv(data.frame(cell_barcode = rownames(glia_meta)),
+          "glia_barcodes.csv", row.names = FALSE)
+
+# optional per-glial-class barcode files
+for (ct in glia_types) {
+  cells_ct <- rownames(meta_handoff)[meta_handoff$broad_celltype == ct]
+  write.csv(
+    data.frame(cell_barcode = cells_ct),
+    paste0(tolower(ct), "_barcodes.csv"),
+    row.names = FALSE
+  )
+}
+
+# -----------------------------
+# 6) quick summaries to verify export
+# -----------------------------
+cat("Handoff broad cell types:\n")
+print(table(obj_handoff$broad_celltype))
+
+cat("\nMicroglia cells:", ncol(microglia_obj), "\n")
+cat("Glia cells:", ncol(glia_obj), "\n")
+
+cat("\nDimensions of exported tables:\n")
+print(dim(sample_celltype_counts))
+print(dim(sample_cluster_counts))
+
+cat("\nFirst few rows of sample_by_celltype_counts_long:\n")
+print(head(sample_celltype_counts))
+```
+
