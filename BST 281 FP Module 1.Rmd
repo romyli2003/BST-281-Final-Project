@@ -363,7 +363,7 @@ top_markers
 Cluster-level annotation table
 
 ```{r}
-# 2) canonical marker panels for broad cell types
+# canonical marker panels for broad cell types
 marker_sets <- list(
   Microglia = c("Tmem119", "P2ry12", "Cx3cr1", "Aif1", "Tyrobp", "Csf1r"),
   Astrocyte = c("Aqp4", "Gfap", "Aldh1l1", "Slc1a3", "Aldoc", "Clu"),
@@ -375,7 +375,7 @@ marker_sets <- list(
   Ependymal_Choroid = c("Foxj1", "Ttr", "Ccdc153", "Pifo")
 )
 
-# 3) average RNA expression by cluster
+# average RNA expression by cluster
 avg_expr <- AverageExpression(
   obj_integrated,
   assays = "RNA",
@@ -387,7 +387,7 @@ avg_expr <- AverageExpression(
 avg_expr_z <- t(scale(t(avg_expr)))
 avg_expr_z[is.na(avg_expr_z)] <- 0
 
-# 4) score each cluster against each marker panel
+# score each cluster against each marker panel
 score_mat <- sapply(names(marker_sets), function(ct) {
   genes <- intersect(marker_sets[[ct]], rownames(avg_expr_z))
   if (length(genes) == 0) {
@@ -485,6 +485,7 @@ We can make some high-confidence broad calls based on the dot plot:
 - `Astrocyte`: 8, 21
 
 Clusters 1, 12, 19, and 30 are still ambiguous and needs further inspection.
+
 ```{r}
 ambig_clusters <- c("1", "12", "19", "30")
 
@@ -501,6 +502,7 @@ ambig_top
 ```
 
 Seeing the marker of the ambiguous clusters help us determined their identities. Below is the reviewed cluster key:
+
 ```{r}
 cluster_key_reviewed <- data.frame(
   cluster = as.character(0:30),
@@ -555,8 +557,8 @@ table(obj_integrated$broad_celltype)
 table(obj_integrated$cluster_id, obj_integrated$broad_celltype)
 ```
 
-I'd exclude cluster 12 from downstream handoff as it contains mostly `Low_quality` calls. The other clusters appear to be in good shape.
-### 9. Exporting files to handoff to teammates
+I'd exclude cluster 12 from downstream handoff as it contains mostly `Low_quality` calls. The other clusters appear to be in good shape. \### 9. Exporting files to handoff to teammates
+
 ```{r}
 # -----------------------------
 # 1) save reviewed annotation key + marker tables
@@ -727,3 +729,277 @@ cat("\nFirst few rows of sample_by_celltype_counts_long:\n")
 print(head(sample_celltype_counts))
 ```
 
+### 10. Final Results for Report and Presentation
+
+Load packages and checkpoints
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(scales)
+
+# Main annotated object
+obj_full <- readRDS("module1_integrated_annotated_full.rds")
+
+# Earlier checkpoints for QC summary
+objs_prefilter <- readRDS("module1_objects_prefilter.rds")
+objs_postfilter <- readRDS("module1_objects_postfilter_initial.rds")
+
+# Count tables for composition plots
+sample_celltype_counts <- read.csv("sample_by_celltype_counts_long.csv", stringsAsFactors = FALSE)
+sample_cluster_counts <- read.csv("sample_by_cluster_counts_long.csv", stringsAsFactors = FALSE)
+sample_info_handoff <- read.csv("sample_info_handoff.csv", stringsAsFactors = FALSE)
+```
+
+QC summary figure
+
+```{r}
+# Build QC metadata from post-filter objects
+qc_df <- do.call(rbind, lapply(names(objs_postfilter), function(s) {
+  md <- objs_postfilter[[s]]@meta.data
+  md$sample_id <- s
+  md
+}))
+
+# Before/after cell counts by sample
+qc_counts <- data.frame(
+  sample_id = names(objs_prefilter),
+  n_before = sapply(objs_prefilter, ncol),
+  n_after = sapply(objs_postfilter, ncol)
+)
+
+qc_counts_long <- rbind(
+  data.frame(sample_id = qc_counts$sample_id, stage = "Before QC", n_cells = qc_counts$n_before),
+  data.frame(sample_id = qc_counts$sample_id, stage = "After QC",  n_cells = qc_counts$n_after)
+)
+
+p_qc_feature <- ggplot(qc_df, aes(x = sample_id, y = nFeature_RNA)) +
+  geom_violin(scale = "width") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Detected genes per nucleus", x = NULL, y = "nFeature_RNA")
+
+p_qc_count <- ggplot(qc_df, aes(x = sample_id, y = nCount_RNA)) +
+  geom_violin(scale = "width") +
+  scale_y_log10() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "UMIs per nucleus", x = NULL, y = "nCount_RNA (log10)")
+
+p_qc_mt <- ggplot(qc_df, aes(x = sample_id, y = percent.mt)) +
+  geom_violin(scale = "width") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Mitochondrial percentage", x = NULL, y = "percent.mt")
+
+p_qc_counts <- ggplot(qc_counts_long, aes(x = sample_id, y = n_cells, fill = stage)) +
+  geom_col(position = "dodge") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Cells retained after QC", x = NULL, y = "Number of nuclei")
+
+p_qc_feature
+p_qc_count
+p_qc_mt
+p_qc_counts
+
+ggsave("Figures/QC_summary.png", plot = (p_qc_feature | p_qc_count) / (p_qc_mt | p_qc_counts), width = 16, height = 10, dpi = 600)
+```
+
+Integrated UMAP overview
+
+```{r}
+DefaultAssay(obj_full) <- "RNA"
+
+p_umap_sample <- DimPlot(
+  obj_full,
+  reduction = "umap",
+  group.by = "sample_id",
+  shuffle = TRUE,
+  raster = TRUE
+) +
+  ggtitle("UMAP colored by sample")
+
+p_umap_condition <- DimPlot(
+  obj_full,
+  reduction = "umap",
+  group.by = "condition",
+  shuffle = TRUE,
+  raster = TRUE
+) +
+  ggtitle("UMAP colored by condition")
+
+p_umap_cluster <- DimPlot(
+  obj_full,
+  reduction = "umap",
+  group.by = "cluster_id",
+  label = TRUE,
+  repel = TRUE,
+  shuffle = TRUE,
+  raster = TRUE
+) +
+  ggtitle("UMAP colored by cluster")
+
+p_umap_celltype <- DimPlot(
+  obj_full,
+  reduction = "umap",
+  group.by = "broad_celltype",
+  label = TRUE,
+  repel = TRUE,
+  shuffle = TRUE,
+  raster = TRUE
+) +
+  ggtitle("UMAP colored by broad cell type")
+
+p_umap_sample
+p_umap_condition
+p_umap_cluster
+p_umap_celltype
+
+ggsave("Figures/UMAP_by_sample.png", plot = p_umap_sample, width = 8, height = 5, dpi = 600)
+ggsave("Figures/UMAP_by_broad_celltype.png", plot = p_umap_celltype, width = 8, height = 5, dpi = 600)
+ggsave("Figures/UMAP_summary.png", plot = (p_umap_sample | p_umap_condition) / (p_umap_cluster | p_umap_celltype), width = 16, height = 10, dpi = 600)
+```
+
+Canonical marker dot plot
+
+```{r, fig.width=12, fig.height=7}
+# Full plot
+canonical_markers <- c(
+  "Tmem119","P2ry12","Cx3cr1","Aif1","Tyrobp","Csf1r",          # microglia
+  "Aqp4","Gfap","Aldh1l1","Slc1a3","Aldoc","Clu",              # astrocyte
+  "Mog","Mbp","Mobp","Plp1","Mag","Cldn11","Sox10",           # oligodendrocyte
+  "Pdgfra","Cspg4","Vcan","Olig1","Olig2",                    # OPC
+  "Snap25","Syt1","Rbfox3","Tubb3","Slc17a7","Gad1","Gad2",   # neuron
+  "Cldn5","Pecam1","Kdr","Flt1","Emcn",                       # endothelial
+  "Rgs5","Pdgfrb","Kcnj8","Abcc9","Acta2","Mcam"              # pericyte/VSMC
+)
+
+canonical_markers <- canonical_markers[canonical_markers %in% rownames(obj_full)]
+
+full_dotplot <- DotPlot(
+  obj_full,
+  features = canonical_markers,
+  assay = "RNA",
+  group.by = "cluster_id"
+) +
+  RotatedAxis() +
+  labs(title = "Canonical marker expression across clusters")
+
+# Reduced plot with only essential markers
+canonical_markers_short <- c(
+  "Tmem119","P2ry12",
+  "Aqp4","Aldh1l1",
+  "Mog","Mbp",
+  "Pdgfra","Cspg4",
+  "Snap25","Slc17a7","Gad1",
+  "Cldn5","Pecam1",
+  "Rgs5","Pdgfrb"
+)
+
+canonical_markers_short <- canonical_markers_short[canonical_markers_short %in% rownames(obj_full)]
+
+selected_dotplot <- DotPlot(
+  obj_full,
+  features = canonical_markers_short,
+  assay = "RNA",
+  group.by = "cluster_id"
+) +
+  RotatedAxis() +
+  labs(title = "Selected canonical markers")
+
+full_dotplot
+selected_dotplot
+
+ggsave("Figures/Selected_Canonical_Markers.png", plot = selected_dotplot, width = 12, height = 7, dpi = 600, bg = 'white')
+```
+
+Cell-type composition by sample and condition
+
+```{r}
+# Stacked bar plot by sample
+sample_order <- sample_info_handoff$sample_id
+sample_celltype_counts$sample_id <- factor(sample_celltype_counts$sample_id, levels = sample_order)
+
+composition_by_sample <- ggplot(sample_celltype_counts, aes(x = sample_id, y = prop_within_sample, fill = broad_celltype)) +
+  geom_col() +
+  scale_y_continuous(labels = percent_format()) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Broad cell-type composition by sample",
+    x = NULL,
+    y = "Within-sample proportion",
+    fill = "Broad cell type"
+  )
+
+# Average composition by condition
+condition_celltype <- sample_celltype_counts %>%
+  group_by(condition, broad_celltype) %>%
+  summarise(
+    mean_prop = mean(prop_within_sample),
+    .groups = "drop"
+  )
+
+avg_composition_by_condition <- ggplot(condition_celltype, aes(x = condition, y = mean_prop, fill = broad_celltype)) +
+  geom_col() +
+  scale_y_continuous(labels = percent_format()) +
+  theme_bw() +
+  labs(
+    title = "Average broad cell-type composition by condition",
+    x = NULL,
+    y = "Mean within-sample proportion",
+    fill = "Broad cell type"
+  )
+
+# Focused glial composition by sample
+glia_types <- c("Microglia", "Astrocyte", "Oligodendrocyte", "OPC")
+
+sample_glia_counts <- sample_celltype_counts %>%
+  filter(broad_celltype %in% glia_types)
+
+glial_composition_by_sample <- ggplot(sample_glia_counts, aes(x = sample_id, y = prop_within_sample, fill = broad_celltype)) +
+  geom_col() +
+  scale_y_continuous(labels = percent_format()) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Glial composition by sample",
+    x = NULL,
+    y = "Within-sample proportion",
+    fill = "Glial cell type"
+  )
+
+composition_by_sample
+avg_composition_by_condition
+glial_composition_by_sample
+
+ggsave("Figures/Composition_by_sample.png", plot = composition_by_sample, width = 8, height = 5, dpi = 600)
+ggsave("Figures/Avg_composition_by_condition.png", plot = avg_composition_by_condition, width = 8, height = 5, dpi = 600)
+ggsave("Figures/glial_composition_by_sample.png", plot = glial_composition_by_sample, width = 8, height = 5, dpi = 600)
+```
+
+Total cells by broad cell type
+
+```{r}
+celltype_counts <- obj_full@meta.data %>%
+  filter(broad_celltype != "Low_quality") %>%
+  count(broad_celltype, name = "n_cells") %>%
+  arrange(desc(n_cells))
+
+total_cells_by_broad_celltype <- ggplot(celltype_counts, aes(x = reorder(broad_celltype, n_cells), y = n_cells, fill = broad_celltype)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  theme_bw() +
+  labs(
+    title = "Cell counts by broad cell type",
+    x = NULL,
+    y = "Number of nuclei"
+  )
+
+total_cells_by_broad_celltype
+
+ggsave("Figures/Total_cells_by_broad_celltype.png", plot = total_cells_by_broad_celltype, width = 8, height = 5, dpi = 600)
+```
